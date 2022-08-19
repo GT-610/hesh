@@ -1,30 +1,29 @@
-#include "lib/default.h"
-#include "lib/bin.h"
+#include "hesh.h"
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
-#define MAXBGPROG 32
-#define MAXARGS 128
-#define HOSTLEN 256
-#define PORTLEN 64
-#define PATHLINE 2048
+#define MAXJOBS 64 // max jobs
+#define MAXBGPROG 32 // max bg program
+#define MAXARGS 256 // max parameters
 
-/* User Config */
-typedef struct config {
-    char PATH[PATHLINE];
-    char P_HOME[512];
-    char P_LBIN[PATHLINE];
-    char server_host[256];
-    char server_port[64];
-    int autoconnect;
-} Config;
-Config usercfg ,* Usercfg;
+Config usercfg ,* Usercfg; // User's config of hesh
+
+volatile int job_exist; // number of job
+JobList job[MAXJOBS]; // job chart
+ssize_t joblen = sizeof(JobList);
+
+
 /* control var */
-char isroot = '$';
+char isroot = '$'; 
 int connected = 0;
-int indexbg[MAXBGPROG];
-int pidprog[MAXBGPROG];
-int bg = 0;
+pid_t prefix_process_group; //gpid of runing process
+pid_t prefix_process; // pid of runing process 
+sigset_t mask_all, mask_one, prev_one;
+
+struct sigaction act_chld, act_int, act_tsip;
 
 /* Server */
 int serverfd;
@@ -33,55 +32,101 @@ int serverfd;
 static char cmd[MAXLINE];
 static char pwd[MAXLINE];
 
-/* ===== functions ===== */
-
-/* sig_handler */
-void child_handler(int sig); 
-void sigint_handler(int sig);
-
 /* base functions */
-void execute(char * arg);
-void paserarg(char * arg, char *args[MAXARGS]);
-void sendcmd(int serverfd, char *arg);
-void input(); // get command
-void inithesh(); // init
+void execute(char *argv[], int control); // execute program
+void exec_bg(char *argv[]); // execute program in background
+void Process(char * arg); // get args
+void show_terminal(); // get command
+void inithesh(); // init to hesh
+
+/* job functions */
+void initjob();
+void addjob(pid_t job_pid, char command[FILENAME]);
+void deletejob(pid_t job_pid);
+
 /* ======== end ======== */
 
+/* sig_handler */
+void chld_handler(int sig){
+    int olderrno = errno;
+    /* char tmp[FILENAME]; */
+    sigset_t mask_all, prev_all;
 
+    pid_t pid;
+    while ((pid = waitpid(-1, NULL, 0)) > 0) {
+        sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
+        deletejob(pid);
+        sigprocmask(SIG_SETMASK, &prev_all, NULL);
+        if (!waitpid(-1, NULL, WNOHANG)) // 如果后台进程组还有其他进程未执行完毕，则立马返回
+            return;
+    }
+    if (errno != ECHILD)
+        Sio_error("waitpid error");
+    errno = olderrno;
+}
+
+void tsip_handler(int sig){
+    write(1, "\n", 2);
+    kill(-prefix_process_group, SIGTSTP);
+}
+
+void sigint_handler(int sig){
+    write(1, "\n", 2);
+    if (prefix_process == 0) {
+        return;
+    }
+    kill(-prefix_process_group, SIGINT);
+}
+
+/* ================= MAIN ================= */
 int main(int argc, char *argv[], char *envp[]){
 
     inithesh();
-    // 判断使用sh的是否是红裤衩外穿的那个人
-    if (!strcmp("root", getenv("USER")))
-        isroot = '#';
+    initjob();
 
-    // 初始化signal
-    signal(SIGINT, sigint_handler);
-    signal(SIGCHLD, child_handler);
-
-    do {
-
-        memset(indexbg,0, sizeof(int) * MAXBGPROG); // clear up indexbg
-        input();
+    while (1) {
+        show_terminal();
+        if (fgets(cmd, MAXLINE, stdin) == NULL){
+            if (feof(stdin))
+                break;
+            continue;
+        }
         if (!strcmp("quit\n", cmd)) {
             break;
         }
-        execute(cmd);
-    }while (1);
+        Process(cmd);
+    }
 
     puts("exit");
-    return 0;
+    exit(0);
 }
+
 void inithesh(){
     FILE *heshrc;
-    char *value;
-    char configbuf[MAXLINE];
+    char *value; // config's value
+    char configbuf[MAXLINE]; // get config of hesh
 
     Usercfg = &usercfg;
     memset(pwd, 0, MAXLINE);
     memset(Usercfg, 0, sizeof(struct config));
     memset(configbuf, 0, MAXLINE);
-    
+
+
+    act_chld.sa_handler = chld_handler;
+    act_int.sa_handler = sigint_handler;
+    act_tsip.sa_handler = tsip_handler;
+    sigfillset(&mask_all);
+    sigemptyset(&mask_one);
+    sigaddset(&mask_one, SIGCHLD);
+
+    sigaction(SIGCHLD, &act_chld, 0);
+    sigaction(SIGINT, &act_int, 0);
+    sigaction(SIGTSTP, &act_tsip, 0);
+
+    // 判断使用sh的是否是红裤衩外穿的那个人
+    if (!strcmp("root", getenv("USER")))
+        isroot = '#';
+
     /* 设置配置文件的路径 */
     strcat(configbuf, getenv("HOME"));
     strcat(configbuf, "/.heshrc");
@@ -102,11 +147,11 @@ void inithesh(){
              * */
             if (!strcmp(configbuf, "server_host")) {
                 strcat(Usercfg->server_host, value+1);
-                printf_clr(Usercfg->server_host, "blue");
+                /* printf_clr(Usercfg->server_host, "blue"); */
             }
             else if (!strcmp(configbuf, "server_port")) {
                 strcat(Usercfg->server_port, value+1);
-                printf_clr(Usercfg->server_port, "blue");
+                /* printf_clr(Usercfg->server_port, "blue"); */
             }
             else if (!strcmp(configbuf, "autoconnect")){
                 Usercfg->autoconnect = atoi(value+1);
@@ -122,175 +167,191 @@ void inithesh(){
         connected = 1;
     }
 }
+void execute(char *args[MAXARGS], int control){
 
-void execute(char *arg){
 
-    char *args[MAXARGS];
-    /*
-     * 如果 connected 是一个非零数则在远程执行
-     * 否则在本地执行*/ 
-    if (connected) {
-        sendcmd(serverfd, arg);
+    if (!strcmp(args[0], "cd")) {
+        chdir(args[1]);
+        return;
     }
-    else {
-        paserarg(arg, args); /* get args[] */
+
+    else if (!strcmp(args[0], "jobs")) {
+        printf("ID\t PID\t JOB_STATUS\t CMD\t\n");
+        for (int i = 0; i < MAXJOBS; ++i) {
+            if (job[i].exist == 1) {
+                printf("%2d\t %3d\t ", job[i].id, job[i].pid);        
+                JOBSTATUS(job[i].status_code);
+                printf("   \t %s\t\n", job[i].command);
+            }
+        }
+        printf("Number Of Jobs: %d\n", job_exist);
+        return;
+    }
+
+    if ((prefix_process = fork()) == -1){
+        printf("Child process could not be created\n"); 
+        return;
+    }
+    if (prefix_process == 0) {
+
+        signal(SIGINT, SIG_IGN);
+
+        sigprocmask(SIG_SETMASK, &prev_one, NULL);
+        if (!strncmp(args[0], "./", 2)) { // ignore leader './'
+            char *realprog = args[0]+2;
+            args[0] = realprog;
+            if (execve(args[0], args, NULL) < 0){
+                printf_clr("can't execute the program", "red");
+                kill(getpid(), SIGTERM);
+            }
+        }
+        else{
+            if(execvp(args[0], args) < 0){
+                printf_clr("command not found...\n", "red");
+                /* kill(getpid(), SIGTERM); */
+                exit(8);
+            }
+        }
+    }
+
+    prefix_process_group = getppid();
+    if (control == PREFIX) {
+        waitpid(prefix_process, NULL, 0);
+    }
+    else{
+        printf("Process created with PID: %d\n", prefix_process);
+        sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        addjob(prefix_process, args[0]);
+        sigprocmask(SIG_SETMASK, &prev_one, NULL);
+    }
+}
+
+void Process(char * command){
+
+    char * args[MAXARGS];
+
+    // init args
+    for (int i = 0; i < MAXARGS; i++) {
+        args[i] = (char *)0;
+    }
+
+    char * next_parameter; // 下一个参数
+    char * prev_parameter; // 上一个参数
+    int index_parameter = 0; // args[]参数的索引
+    int index_prev_cmd = 0; // 如果args拥有多个命令，此为上一个命令的索引
+
+    while (*command == ' ')  // ignore leader space 
+        command++;
+    if (*command == '\n')
+        return;
+    command[strlen(command)-1] = ' '; // 将最后一个字符设置成空格 
+    
+    prev_parameter = command;  // 开始处理
+
+    /* 
+     * 用strchr找到空格，将空格设置为0后，将prev_parameter的值赋值给args
+     * 再将prev_parameter指向下一个参数（next_parameter），一直循环，直到
+     * 没有参数为止*/
+    while ((next_parameter = strchr(prev_parameter, ' '))) {
+
+        for (; *next_parameter == ' '; next_parameter++)
+            *next_parameter = '\0'; // 此时next_parameter指向下一个参数的起始位置
+
+        /* 
+         * 判断，如果是特殊字符就直接运行跳过赋值，然后重新设置prev_parameter的值*/
+        if (!strcmp(prev_parameter, "&&")) {
+            if (args[index_prev_cmd] == (char *)0) {
+                printf_clr("Syntax Error: No command...\n", "r");
+                return;
+            }
+            execute(&args[index_prev_cmd], PREFIX);
+            index_prev_cmd = index_parameter;
+            prev_parameter = next_parameter; // ignore special character
+            continue;
+        }
+        if (!strcmp(prev_parameter, "&")) {
+            if (args[index_prev_cmd] == (char *)0) {
+                printf_clr("Syntax Error: There is no command before the `&`...\n", "r");
+                return;
+            }
+            execute(&args[index_prev_cmd], BACKGROUND);
+            index_prev_cmd = index_parameter;
+            prev_parameter = next_parameter;
+            continue;
+        }
         
-        /* parse args, if *args[0] == '&' 
-         * then skip and print error.*/
-        if (*args[0] != '&')
-        {
-            /* if args[0] in hesh's bins
-             * otherwise execute fork()*/
-                /* 如果indexbg[0] 不为0，则代表命令中含有 &，则不能执行
-                 * connect命令也不能放在后台运行*/
+        args[index_parameter++] = prev_parameter; // 赋值
 
-            if (bg)  {
-
-
-            /*===================   if   ====================*/
-
-
-                if (!strcmp(args[0], "cd") && indexbg[0] == 0) {
-                    if (indexbg[0] == 0) {
-                        printf_clr("cd cannot be executed in the background.\n", "red");
-                        return;
-                    }
-                    cd(pwd, args[1]);
-                }
-
-
-                else if (!strcmp(args[0], "connect") && indexbg[0] == 0) {
-                    if (indexbg[0] == 0) {
-                        printf_clr("connected cannot be executed in the background.\n", "red");
-                        return;
-                    }
-                    if (connected > 0) {
-                        printf("Connected: {Host: %s, Prot: %s\n", args[1], args[2]);
-                        return;
-                    }
-                    serverfd = open_clientfd(args[1], args[2]);
-                    connected = 1;
-                }
-
-
-
-                else
-                {
-                    int n = 0;
-                    do {
-                            pid_t  pid;
-                            if ((pid = fork()) == 0) {
-                                if (!strncmp(args[0], "./", 2)) {
-                                    /* ignore leader './' */
-                                    char *realprog = args[0]+2;
-                                    args[0] = realprog;
-                                    if (execve(args[0], args, NULL) < 0) 
-                                        printf_clr("can't execute the program", "red");
-                                }
-                                else{
-                                    if(execvp(args[0], args) < 0)
-                                        printf_clr("command not found...\n", "red");
-                                }
-                                exit(1);
-                            }
-                            wait(NULL);
-                            n++;
-                    } while(args[n]);
-                }
-
-
-
-            }
-            /*===================   if   ====================*/
-
-            else {
-
-            /*===================   else   ====================*/
-                if (!strcmp(args[0], "cd")) {
-                    cd(pwd, args[1]);
-                }
-                else if (!strcmp(args[0], "connect")) {
-                    if (connected > 0) {
-                        printf("Connected: {Host: %s, Prot: %s\n", args[1], args[2]);
-                        return;
-                    }
-                    serverfd = open_clientfd(args[1], args[2]);
-                    connected = 1;
-                }
-                else
-                {
-                    pid_t  pid;
-                    if ((pid = fork()) == 0) {
-                        if (!strncmp(args[0], "./", 2)) {
-                            /* ignore leader './' */
-                            char *realprog = args[0]+2;
-                            args[0] = realprog;
-                            if (execve(args[0], args, NULL) < 0) 
-                                printf_clr("can't execute the program", "red");
-                        }
-                        else{
-                            if(execvp(args[0], args) < 0)
-                                printf_clr("command not found...\n", "red");
-                        }
-                        exit(1);
-                    }
-                    wait(NULL);
-                }
-            /*===================   else   ====================*/
-
-            }
-        }
+        prev_parameter = next_parameter; // 指向下一个字符
     }
+
+    if (args[index_prev_cmd] == (char *)0) { 
+        return;
+    }
+
+    execute(&args[index_prev_cmd], PREFIX);
 
 }
 
-void paserarg(char * command, char *args[MAXARGS]){
-    char * paraments = command;
-    char *findspace;
-    char *prevarg;
-    int indexarg = 0;
 
-    while (*paraments == ' ')  // 忽略领头的空格
-        paraments++;
-    if (*paraments == '\n')  // 如果遇到换行符直接跳过
-       return; 
-    paraments[strlen(paraments)-1] = ' '; // 将最后一个字符设置为空
-
-    prevarg = paraments;
-    /*
-     * 不断的寻找下一个空格，如果找到一个空格就判断下一个字符是否为空格
-     * 并把空格替换为0，复制给args数组中。
-     * 如果遇到&字符，就把当前的args中的&位置索引赋值到indexbg数组中
-     * index_bg控制indexbg的位置*/
-    int index_bg = 0;
-    while ((findspace = strchr(prevarg, ' '))) {
-        for (; *findspace == ' '; findspace++)
-            *findspace = '\0';
-        args[indexarg++] = prevarg;
-        if (!strcmp(args[indexarg-1], "&")) {
-            indexbg[index_bg] = indexarg-1;
-            index_bg++;
-        }
-        prevarg = findspace;
-    }
-    indexbg[0] == 0 ? (bg = 0) : (bg = 1);
-    /* set rear to NULL */
-    args[indexarg] = (char*)0;
-
-
+void initjob(){
+    memset(&job, 0, joblen * MAXJOBS);
+    job_exist = 0;
 }
-void input(){
 
+void addjob(pid_t job_pid, char command_msg[FILENAME]){
+    int post; // 查找joblist中的空位置
+    for (post = 0; job[post].exist != 0 && post < MAXJOBS; ++post)
+        ; 
+    if (post >= MAXJOBS) {
+        sio_puts("joblist is full\n");
+        return;
+    }
+
+    job[post].id = post;
+    job[post].pid = job_pid;
+    job[post].status_code = RUNNING;
+    job[post].exist = 1;
+    strcpy(job[post].command, command_msg);
+    job_exist++;
+}
+
+void deletejob(pid_t job_pid){
+    int i;
+    for (i = 0; i < MAXJOBS; ++i) {
+       if (job[i].pid == job_pid) 
+           break;
+    }
+    printf("\n[%d]\t +%d\t done\t %s\t\n", job[i].id, job[i].pid, job[i].command);
+    memset(&job[i], 0, joblen);
+    job_exist--;
+}
+
+void show_terminal(){
+
+    time_t t;
+    struct tm * lt;
+    time(&t);
+    lt = localtime(&t);
+
+    printf("\033[0m\033[1;35m{\033[0m\
+\033[0m\033[1;31m%s\033[0m\
+\033[0m\033[1;35m}^\033[0m\
+\033[0m\033[1;35m[\033[0m\
+\033[0m\033[1;32m%s\033[0m\
+\033[0m\033[1;35m]^\033[0m\
+\033[0m\033[1;35m(\033[0m\
+\033[0m\033[1;36m%d\033[0m\
+\033[0m\033[1;35m:\033[0m\
+\033[0m\033[1;36m%d\033[0m\
+\033[0m\033[1;35m:\033[0m\
+\033[0m\033[1;36m%d\033[0m\
+\033[0m\033[1;35m)\n\033[0m\
+\033[0m\033[1;32m %c \033[0m"
+            ,getenv("USER"), getenv("PWD"),
+            lt->tm_hour, lt->tm_min,
+            lt->tm_sec, isroot);
     memset(cmd, 0, MAXLINE);
-    /* printf("{%s}:%s:%c>", getenv("PWD"), getenv("USER"), isroot); */
-    printf("\033[0m\033[1;32m%s\033[0m\033[0m\033[1;31m%c\033[0m", getenv("USER"), isroot); 
-    fgets(cmd, MAXLINE, stdin);
+    fflush(stdout);
 }
 
-void sigint_handler(int sig){
-
-}
-
-void child_handler(int sig){
-
-}

@@ -23,10 +23,15 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#define MSGLINE 1024
 #define MAXLINE 8192
 #define LISTENQ 1024
 #define FILEN 16
 #define FILENAME 256
+#define PATHLINE 2048
+#define HOSTLINE 256 
+#define PORTLINE 64
+typedef void handler_t(int);
 
 typedef struct {
     int *buf;       // 动态分配的数组指针 
@@ -63,12 +68,23 @@ int sbuf_remove(sbuf_t *sp);
 
 /* 彩色化输出 */
 void printf_clr(const char *s, const char *color);
+void printf_security(const char *s, size_t n);
+void unix_error(char *msg);
 
-/* 将整个字符串数组初始化为null 
- * 第一个参数指明数组维度
- * 后面的参数是数组维度的值
- * 从第一维到最后一维 */
-// void Nulltoarray(int n, ...);
+/* sio_reverse - Reverse a string (from K&R) */
+static void sio_reverse(char s[]);
+/* sio_ltoa - Convert long to base b string (from K&R) */
+static void sio_ltoa(long v, char s[], int b);
+/* sio_strlen - Return length of string (from K&R) */
+static size_t sio_strlen(char s[]);
+ssize_t sio_puts(char s[]); /* Put string */
+ssize_t sio_putl(long v); /* Put long */
+void sio_error(char s[]); /* Put error message and exit */
+ssize_t Sio_putl(long v);
+ssize_t Sio_puts(char s[]);
+void Sio_error(char s[]);
+
+handler_t *Signal(int signum, handler_t *handler);
 
 int open_clientfd(char *hostname, char *port);
 int open_listenfd(char *port);
