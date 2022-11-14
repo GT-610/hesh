@@ -1,38 +1,46 @@
-# Hesh
+# WARNING 
+* The program has many critical bugs. 
+* And this documentation is a joke.
+* The program does not have the functions described.
 
-#### `Hesh` 是一个简单的带作业控制的 [Linux Shell](https://baike.baidu.com/item/Linux%20Shell/10142850) 。hesh并没有自己的脚本语言。hesh拥有自己的配置文件，用户可以通过配置文件来配置hesh。
+***
+# hesh (highly easily shell)
 
-*   #### hesh 特殊标志
+***
 
-    *  `&` 
-        如果一条命令后面跟上这种标志，shell会把它解释成放在后台执行该指令。当然，你可以通过一些控制命令来控制这个后台作业。
-    *  `&&`
-        如果一条命令后面跟上这种标志，shell会执行此标志前的指令，待指令执行结束再接着执行
-        && 后面的指令。以此类推。
-    *  `>>` `<<` `>` `<`
-        此类为重定向标志，将程序输入重定向到一个制定的文件当中去。>>
-        是附加到制定文件后面。> 是将输出写入到文件当中。
-    *  `|` 
-        管道标志。将管道之前的命令的输出作为管道后面命令的输入。
+### Info
 
-*   #### hesh 内置命令
+​		**hesh** provides limited function. hesh has a difference with real linux shell. For example, when user send SIGINT to foreground process, kernal will send the signal to the process in real linux shell, but the function is implemented by parent process forward to child process in hesh.
 
-    * `jobs` 列出所有的后台进程
-    * `bg` 重启一个pid，并在后台运行它
-    * `fg` 重启一个pid，并在前台运行它
-    * `connect` 连接制定的部署了` hesh_server `的服务器
-    * `hestl` 将远程服务器文件或者目录复制到本地指定的路径当中
-    * `helts` 将本地文件或者目录复制到远程服务器指定的路径当中
+​		Roughly speacking, hesh pushes back function implementing thought real linux shell.
 
-*   #### hesh 配置选项
+***
 
-    * `autoconnect` 是否自动连接到远程服务器
-    * `host` & `prot` 远程服务器的域名和端口
-    * `PATH` 自定义的环境变量路径
+### How to work
+​		You will see a simple command line when you start-up the program. It's the program interface. It's waitting input a command then to process. 
 
-### 待实现
-* 重定向
-* 管道
-* connect, hestl, helts, bg, fg
-* 配置选项
+​		hesh has a particular function called 'process'. The function every character one by one, and handle special symbol. It will replace all space to '\0'. Then, it will check every string and handle special character or string.  hesh allocate indexed array to every flag. Every location of flag will be storaged its own indexed array. When it's done, hesh will use a specific way to execute them.
+
+​		It has logic on own. '&' and "&&" have highest level in the program. 
+
+Because of '&' and '&&' have highest level, so you may will encounter such a situation:
+
+> grep "love" text.txt | prog & echo "hesh is garbage" >> tmp.txt & sleep 3 && jobs
+
+For this command, hesh treat `grep "love" text.txt`  and `echo "hesh is grabage" >> tmp.txt` as background process.  `grep` and `echo`  were executed independently by the parent process calls twice fork(). Then, the parent execute `sleep 3` on foreground, hesh will suspend 3 sec and execute `jobs` .
+
+### Function
+
+**hesh** has in internal command:
+
+```
+*   jobs	 		  // show all backgroud process  
+*   fg #job_id        // stop job
+*   cg #job_id        // restart job
+```
+
+
+
+You also use`Ctrl+C`  or `Ctrl+Z`  to control foreground process.
+Like other shell，hesh provides '&', "&&", '>', '<', ">>", '|'。
 
