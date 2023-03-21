@@ -1,6 +1,9 @@
 #include "hesh.h"
+#include <fcntl.h>
+#include <linux/limits.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -8,12 +11,16 @@
 #define MAXJOBS 64 // max jobs
 #define MAXBGPROG 32 // max bg program
 #define MAXARGS 256 // max parameters
+#define MAXLEN 1024
 
 Config usercfg ,* Usercfg; // User's config of hesh
 
+struct redirect_sign sign; // store special sign 
+
+//job
 volatile int job_exist; // number of job
-JobList job[MAXJOBS]; // job chart
-ssize_t joblen = sizeof(JobList);
+JobList job[MAXJOBS]; // job data
+ssize_t joblen = sizeof(JobList); // len of job struct
 
 
 /* control var */
@@ -30,12 +37,12 @@ int serverfd;
 
 /* base data */
 static char cmd[MAXLINE];
-static char pwd[MAXLINE];
+static char cwd[PATH_MAX];
 
 /* base functions */
+void f_redirection(char *args[MAXARGS], struct redirect_sign * sign, int * redirect);
 void execute(char *argv[], int control); // execute program
-void exec_bg(char *argv[]); // execute program in background
-void Process(char * arg); // get args
+void process(char * arg); // get args
 void show_terminal(); // get command
 void inithesh(); // init to hesh
 
@@ -47,9 +54,9 @@ void deletejob(pid_t job_pid);
 /* ======== end ======== */
 
 /* sig_handler */
+
 void chld_handler(int sig){
     int olderrno = errno;
-    /* char tmp[FILENAME]; */
     sigset_t mask_all, prev_all;
 
     pid_t pid;
@@ -86,15 +93,21 @@ int main(int argc, char *argv[], char *envp[]){
 
     while (1) {
         show_terminal();
+
         if (fgets(cmd, MAXLINE, stdin) == NULL){
-            if (feof(stdin))
-                break;
-            continue;
+
+            show_terminal();
+            fgets(cmd, MAXLINE, stdin);
         }
-        if (!strcmp("quit\n", cmd)) {
+
+        if (feof(stdin))
+            break;
+
+        if (!strcmp("quit\n", cmd) | !strcmp("exit\n", cmd)) {
             break;
         }
-        Process(cmd);
+
+        process(cmd);
     }
 
     puts("exit");
@@ -107,7 +120,7 @@ void inithesh(){
     char configbuf[MAXLINE]; // get config of hesh
 
     Usercfg = &usercfg;
-    memset(pwd, 0, MAXLINE);
+    memset(cwd, 0, PATH_MAX);
     memset(Usercfg, 0, sizeof(struct config));
     memset(configbuf, 0, MAXLINE);
 
@@ -117,7 +130,7 @@ void inithesh(){
     act_tsip.sa_handler = tsip_handler;
     sigfillset(&mask_all);
     sigemptyset(&mask_one);
-    sigaddset(&mask_one, SIGCHLD);
+    sigaddset(&mask_one, SIGCHLD); 
 
     sigaction(SIGCHLD, &act_chld, 0);
     sigaction(SIGINT, &act_int, 0);
@@ -167,12 +180,66 @@ void inithesh(){
         connected = 1;
     }
 }
+
+void f_redirection(char *args[MAXARGS], struct redirect_sign * sign, int * redirect){
+
+    int n_redirect = 0;
+    int index_redirect;
+
+    for (index_redirect = 0; args[index_redirect]; index_redirect++) {
+
+        if (n_redirect > 1) {
+            printf_clr("too many redirection symbols...\n", "r");
+            return;
+        }
+        if (!strcmp(args[index_redirect], ">")) {
+            sign->post[n_redirect] = index_redirect;
+            sign->type[n_redirect] = AS_OUT_W;
+            n_redirect++;
+        }
+        else if (!strcmp(args[index_redirect], ">>")) {
+            sign->post[n_redirect] = index_redirect;
+            sign->type[n_redirect] = AS_OUT_A;
+            n_redirect++;
+        }
+        else if (!strcmp(args[index_redirect], "<")) {
+            sign->post[n_redirect] = index_redirect;
+            sign->type[n_redirect] = AS_IN;
+            n_redirect++;
+        }
+
+    }
+
+
+
+
+    if (n_redirect) {
+        if (sign->type[0] == AS_OUT_W) {
+            redirect[0] = open(args[sign->post[0]+1], O_WRONLY | O_CREAT, 0644);
+        }
+    }
+
+}
+
 void execute(char *args[MAXARGS], int control){
 
+    /* struct redirect_sign sign_localtion;    */
+    /* int redirect[2]; */
+    /* f_redirection(args, &sign_localtion, redirect); */
 
+    /* ===built-in=== */
     if (!strcmp(args[0], "cd")) {
-        chdir(args[1]);
+        int ret = chdir(args[1]);
+        if (ret == 0) {
+            if (getcwd(cwd, sizeof(cwd)) != NULL) 
+                setenv("PWD", cwd, 1);
+            else 
+                perror("getcwd() error");
+        }
+        else
+            perror("chdir() error");
         return;
+        
     }
 
     else if (!strcmp(args[0], "jobs")) {
@@ -187,6 +254,12 @@ void execute(char *args[MAXARGS], int control){
         printf("Number Of Jobs: %d\n", job_exist);
         return;
     }
+    /* ==== END ==== */
+
+
+
+    // block SIGCHLD
+    sigprocmask(SIG_BLOCK, &mask_one, &prev_one);
 
     if ((prefix_process = fork()) == -1){
         printf("Child process could not be created\n"); 
@@ -196,6 +269,7 @@ void execute(char *args[MAXARGS], int control){
 
         signal(SIGINT, SIG_IGN);
 
+        // unblocking SIGCHLD in child
         sigprocmask(SIG_SETMASK, &prev_one, NULL);
         if (!strncmp(args[0], "./", 2)) { // ignore leader './'
             char *realprog = args[0]+2;
@@ -214,82 +288,112 @@ void execute(char *args[MAXARGS], int control){
         }
     }
 
-    prefix_process_group = getppid();
+    /* prefix_process_group = getppid(); */
+    /* prefix_process = 0; */
     if (control == PREFIX) {
         waitpid(prefix_process, NULL, 0);
     }
-    else{
+    else {
         printf("Process created with PID: %d\n", prefix_process);
-        sigprocmask(SIG_BLOCK, &mask_all, NULL);
         addjob(prefix_process, args[0]);
-        sigprocmask(SIG_SETMASK, &prev_one, NULL);
+        sigprocmask(SIG_SETMASK, &prev_one, NULL); // unblocking SIGCHLD
     }
+
 }
 
-void Process(char * command){
+void process(char *cmd){
 
-    char * args[MAXARGS];
+    int isstr = 0;
+    int n_arg = 0;
+    int parameter = 0;
 
-    // init args
-    for (int i = 0; i < MAXARGS; i++) {
-        args[i] = (char *)0;
-    }
-
-    char * next_parameter; // 下一个参数
-    char * prev_parameter; // 上一个参数
-    int index_parameter = 0; // args[]参数的索引
-    int index_prev_cmd = 0; // 如果args拥有多个命令，此为上一个命令的索引
-
-    while (*command == ' ')  // ignore leader space 
-        command++;
-    if (*command == '\n')
-        return;
-    command[strlen(command)-1] = ' '; // 将最后一个字符设置成空格 
+    char stored_cmd[MAXARGS][MAXLEN];
+    memset(stored_cmd, 0, MAXARGS*MAXLEN);
     
-    prev_parameter = command;  // 开始处理
-
-    /* 
-     * 用strchr找到空格，将空格设置为0后，将prev_parameter的值赋值给args
-     * 再将prev_parameter指向下一个参数（next_parameter），一直循环，直到
-     * 没有参数为止*/
-    while ((next_parameter = strchr(prev_parameter, ' '))) {
-
-        for (; *next_parameter == ' '; next_parameter++)
-            *next_parameter = '\0'; // 此时next_parameter指向下一个参数的起始位置
-
-        /* 
-         * 判断，如果是特殊字符就直接运行跳过赋值，然后重新设置prev_parameter的值*/
-        if (!strcmp(prev_parameter, "&&")) {
-            if (args[index_prev_cmd] == (char *)0) {
-                printf_clr("Syntax Error: No command...\n", "r");
-                return;
-            }
-            execute(&args[index_prev_cmd], PREFIX);
-            index_prev_cmd = index_parameter;
-            prev_parameter = next_parameter; // ignore special character
-            continue;
-        }
-        if (!strcmp(prev_parameter, "&")) {
-            if (args[index_prev_cmd] == (char *)0) {
-                printf_clr("Syntax Error: There is no command before the `&`...\n", "r");
-                return;
-            }
-            execute(&args[index_prev_cmd], BACKGROUND);
-            index_prev_cmd = index_parameter;
-            prev_parameter = next_parameter;
-            continue;
-        }
-        
-        args[index_parameter++] = prev_parameter; // 赋值
-
-        prev_parameter = next_parameter; // 指向下一个字符
-    }
-
-    if (args[index_prev_cmd] == (char *)0) { 
+    while (*cmd == ' ')  // ignore leader space 
+        cmd++;
+    if (*cmd == '\n')
         return;
+
+    for (; *cmd != '\n'; cmd++) {
+
+        /* 忽略引号中的特殊字符，仅当做字符串存储 */
+        if (*cmd == '"') {
+            stored_cmd[n_arg][parameter++] = *cmd++;
+            while (*cmd != '"') {
+                stored_cmd[n_arg][parameter++] = *cmd++;
+            }
+            stored_cmd[n_arg][parameter++] = *cmd;
+            continue;
+        }
+        if (*cmd == '\'') {
+            stored_cmd[n_arg][parameter++] = *cmd++;
+            while (*cmd != '\'') {
+                stored_cmd[n_arg][parameter++] = *cmd++;
+            }
+            stored_cmd[n_arg][parameter++] = *cmd;
+            continue;
+        }
+
+        /*跳到下一个参数*/
+        if(*cmd == ' '){
+            stored_cmd[n_arg++][parameter] = '\0';
+            parameter = 0;
+            continue;
+        }
+        /*===========================================*/
+
+        stored_cmd[n_arg][parameter++] = *cmd;
+
     }
 
-    execute(&args[index_prev_cmd], PREFIX);
+    /*====init_args======*/
+    char * args[MAXARGS];
+    for (int i = 0; i < MAXARGS; i++) 
+        args[i] = NULL;
+    /*====init_args======*/
+
+    int i_cmd = 0, i_args = 0;
+    for (; i_args <= n_arg; i_args++) {
+
+        if (!strcmp(stored_cmd[i_args], "&&")) {
+            if (args[i_cmd] != NULL)
+                /* execute(&args[i_cmd], i_args-i_cmd, PREFIX); */
+                execute(&args[i_cmd],  PREFIX);
+            else{
+                printf("Syntax Error:\n");
+                return;
+            }
+            if (i_args == n_arg) 
+                return;
+            else
+                i_cmd = i_args+1;
+
+        }
+        else if (!strcmp(stored_cmd[i_args], "&")) {
+            if (args[i_cmd] != NULL) 
+                /* execute(args, i_args-i_cmd, BACKGROUND); */
+                execute(args,  BACKGROUND);
+            else{
+                printf("Syntax Error:\n");
+                return;
+            }
+            if (i_args == n_arg) 
+                return;
+            else
+                i_cmd = i_args+1;
+        }
+        else {
+            args[i_args] = stored_cmd[i_args]; 
+        }
+    }
+
+
+    if (args[i_cmd] != NULL)
+        /* execute(&args[i_cmd], i_args-i_cmd-1, PREFIX); */
+        execute(&args[i_cmd], PREFIX);
+    else
+        printf("Syntax Error:\n");
 
 }
 
@@ -333,6 +437,7 @@ void show_terminal(){
     struct tm * lt;
     time(&t);
     lt = localtime(&t);
+
 
     printf("\033[0m\033[1;35m{\033[0m\
 \033[0m\033[1;31m%s\033[0m\
