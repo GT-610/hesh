@@ -1,3 +1,5 @@
+#ifndef STATUS
+#define STATUS
 #include <stdio.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -30,12 +32,34 @@
 #define FILEN 16
 #define FILENAME 256
 #define PATHLINE 2048
-#define HOSTLINE 256 
+#define HOSTLINE 256
 #define PORTLINE 64
+
+
+#define MAXJOBS 64 // max jobs
+#define MAXBGPROG 32 // max bg program
+#define MAXARGS 256 // max parameters
+#define MAXLEN 1024
+
+/* Process status 
+ * ===Cannot Be Changed=== */
+#define RUNNING 0x0001  
+#define STOPPED 0x0000
+
+/* Process mode */
+#define BACKGROUND 0x0001
+#define PREFIX 0x0000
+
+/* Special sign */
+#define AS_OUT_W 0x0010 // >
+#define AS_OUT_A 0x0020 // >> 
+#define AS_IN 0x0040  // <
+
+
 typedef void handler_t(int);
 
 typedef struct {
-    int *buf;       // 动态分配的数组指针 
+    int *buf;       // 动态分配的数组指针
     int n;          // 最大成员数
     int front;      // 第一个项 buf[(front+1)%n]
                     // 是buf的第一个可用项的索引
@@ -48,7 +72,7 @@ typedef struct {
     int rear;       // 最后一项 buf[rear%n]
                     // 是buf最后一个可用项后的空项的索引
                     // 添加新项目时将其加一
-                        /* 
+                        /*
                          * read adj. 后方的，后面的;
                          * n. 后部; 屁股;
                          * v. 抚养; 养育; 培养;
@@ -57,6 +81,12 @@ typedef struct {
     sem_t slots;    // 记录空槽位
     sem_t items;    // 可用项目的数量
 } sbuf_t;
+
+/* special sign struct */
+struct redirect_sign {
+    int post[2];
+    int type[2];
+};
 
 /* 创建一个空的，拥有n个空槽的共享缓冲区 */
 void sbuf_init(sbuf_t *sp, int n);
@@ -91,3 +121,16 @@ int open_clientfd(char *hostname, char *port);
 int open_listenfd(char *port);
 int recvfile(int fd, char *filename);
 int sendfile(int fd, char *filename);
+
+
+void initArgs(char **args, int n);
+
+/* parsed是需要重定向的程序，toparsed是要重定向到的程序 
+ * pid_group 是这些进程的进程组号*/
+void execArgsPiped(char **parsed, char **toparsed, pid_t pid_group);
+
+void call_execArgsPiped(char **args);
+
+
+
+#endif

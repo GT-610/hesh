@@ -1,7 +1,7 @@
-#include "default.h"
-#include <signal.h>
-#include <stdio.h>
-#include <string.h>
+#include "hesh.h"
+#include <sys/types.h>
+#include <unistd.h>
+
 
 void sbuf_init(sbuf_t *sp, int n){
     /* 为buf（一个指向int的指针）分配空间 */
@@ -158,6 +158,89 @@ void printf_clr(const char *s, const char *color){
     }
 
 }
+
+void initArgs(char **args, int n){
+    for (int i = 0; i < n; i++) 
+        args[i] = NULL;
+}
+/* void call_execArgsPiped(char **args){ */
+/*             char *Args[2][MAXARGS]; */
+/*             initArgs(Args[0], MAXARGS); */
+/*             initArgs(Args[1], MAXARGS); */
+/*             for (int j; j < i; j++)  // copy args to Args[0] */
+/*                 Args[0][j] = args[j]; */
+/* } */
+
+void execArgsPiped(char **parsed, char **toparsed, pid_t pid_group){
+    // 0 is read end, 1 is write end;
+    int pipefd[2];
+    pid_t p1, p2;
+
+    if (pipe(pipefd) < 0) {
+        printf("\nPipe could not be initialized\n");
+        return;
+    }
+    if ((p1 = fork()) == -1){
+        printf("Child process could not be created\n"); 
+        return;
+    }
+    if (p1 == 0) {
+
+
+        setpgid(0, 0); // 将自己的进程号添加到自己的进程组
+
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO); //将管道的写端已经复制到标准输出了
+        close(pipefd[1]);
+        if (!strncmp(parsed[0], "./", 2)) { // ignore leader './'
+            char *prog = parsed[0]+2;
+            parsed[0] = prog;
+            if (execve(parsed[0], parsed, NULL) < 0){
+                printf_clr("can't execute the program", "red");
+                exit(8);
+            }
+        }
+        else{
+            if(execvp(parsed[0], parsed) < 0){
+                printf_clr("command not found...\n", "red");
+                /* kill(getpid(), SIGTERM); */
+                exit(8);
+            }
+        }
+    } else {
+        if ((p2 = fork()) == -1){
+            printf("Child process could not be created\n"); 
+            return;
+        }
+        if (p2 == 0) {
+
+            setpgid(0, p1); // 将自己的进程号添加到p1的进程组中
+            close(pipefd[1]);
+            dup2(pipefd[0], STDIN_FILENO); //将管道的写端已经复制到标准输出了
+                                           //所以不需要原来的文件描述符了
+            close(pipefd[0]);
+            if (!strncmp(parsed[0], "./", 2)) { // ignore leader './'
+                char *prog = parsed[0]+2;
+                parsed[0] = prog;
+                if (execve(parsed[0], parsed, NULL) < 0){
+                    printf_clr("can't execute the program", "red");
+                    exit(8);
+                }
+            } else {
+                if(execvp(parsed[0], parsed) < 0){
+                    printf_clr("command not found...\n", "red");
+                    /* kill(getpid(), SIGTERM); */
+                    exit(8);
+                }
+            }
+        
+        }
+
+    }
+    pid_group = p1; // 返回进程组号
+}
+
+
 
 /*************************************************************
  * The Sio (Signal-safe I/O) package - simple reentrant output

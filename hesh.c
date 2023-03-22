@@ -1,21 +1,8 @@
-#include "hesh.h"
-#include <fcntl.h>
-#include <linux/limits.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
-#define MAXJOBS 64 // max jobs
-#define MAXBGPROG 32 // max bg program
-#define MAXARGS 256 // max parameters
-#define MAXLEN 1024
+#include "lib/hesh.h"
+#include "lib/job.h"
+#include "lib/config.h"
 
 Config usercfg ,* Usercfg; // User's config of hesh
-
-struct redirect_sign sign; // store special sign 
 
 //job
 volatile int job_exist; // number of job
@@ -26,6 +13,8 @@ ssize_t joblen = sizeof(JobList); // len of job struct
 /* control var */
 char isroot = '$'; 
 int connected = 0;
+
+
 pid_t prefix_process_group; //gpid of runing process
 pid_t prefix_process; // pid of runing process 
 sigset_t mask_all, mask_one, prev_one;
@@ -46,24 +35,20 @@ void process(char * arg); // get args
 void show_terminal(); // get command
 void inithesh(); // init to hesh
 
-/* job functions */
-void initjob();
-void addjob(pid_t job_pid, char command[FILENAME]);
-void deletejob(pid_t job_pid);
-
 /* ======== end ======== */
 
 /* sig_handler */
 
 void chld_handler(int sig){
     int olderrno = errno;
-    sigset_t mask_all, prev_all;
+    sigset_t mask_all, prev_mask;
+    sigfillset(&mask_all);
 
     pid_t pid;
     while ((pid = waitpid(-1, NULL, 0)) > 0) {
-        sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
-        deletejob(pid);
-        sigprocmask(SIG_SETMASK, &prev_all, NULL);
+        sigprocmask(SIG_BLOCK, &mask_all, &prev_mask);
+        deletejob(job, joblen, pid, job_exist);
+        sigprocmask(SIG_SETMASK, &prev_mask, NULL);
         if (!waitpid(-1, NULL, WNOHANG)) // 如果后台进程组还有其他进程未执行完毕，则立马返回
             return;
     }
@@ -82,22 +67,30 @@ void sigint_handler(int sig){
     if (prefix_process == 0) {
         return;
     }
+    sigset_t mask_all, prev_mask;
+    sigfillset(&mask_all);
+    
+    sigprocmask(SIG_BLOCK, &mask_all, &prev_mask);
     kill(-prefix_process_group, SIGINT);
+    wait(NULL); //回收子进程，而不是通过信号处理函数
+    sigprocmask(SIG_SETMASK, &prev_mask, NULL);
+
 }
 
 /* ================= MAIN ================= */
 int main(int argc, char *argv[], char *envp[]){
 
     inithesh();
-    initjob();
+    initjob(job, joblen*MAXJOBS, job_exist);
 
     while (1) {
         show_terminal();
 
         if (fgets(cmd, MAXLINE, stdin) == NULL){
-
-            show_terminal();
-            fgets(cmd, MAXLINE, stdin);
+            if (feof(stdin))
+                break;
+           show_terminal();
+           fgets(cmd, MAXLINE, stdin);
         }
 
         if (feof(stdin))
@@ -223,11 +216,19 @@ void f_redirection(char *args[MAXARGS], struct redirect_sign * sign, int * redir
 
 void execute(char *args[MAXARGS], int control){
 
+    // 存储命令
+    char JOBCMD[PATH_MAX];
+    memset(JOBCMD, 0, PATH_MAX);
+    for (int i = 0; args[i]; i++){
+        strcat(JOBCMD, args[i]);
+        strcat(JOBCMD, " ");
+    }
+
     /* struct redirect_sign sign_localtion;    */
     /* int redirect[2]; */
     /* f_redirection(args, &sign_localtion, redirect); */
 
-    /* ===built-in=== */
+    /* ===built-in 内置命令 === */
     if (!strcmp(args[0], "cd")) {
         int ret = chdir(args[1]);
         if (ret == 0) {
@@ -256,6 +257,22 @@ void execute(char *args[MAXARGS], int control){
     }
     /* ==== END ==== */
 
+    /* [> 判断特殊字符 <] */
+    /* for (int i = 0; args[i];i++) { */
+    /*  */
+    /*     if (!strcmp(args[i], "|")) { */
+    /*  */
+    /*     } else if (!strcmp(args[i], ">>")) { */
+    /*  */
+    /*     } else if (!strcmp(args[i], "<")) { */
+    /*  */
+    /*     } else if (!strcmp(args[i], ">")) { */
+    /*  */
+    /*     } */
+    /*  */
+    /*  */
+    /* } */
+
 
 
     // block SIGCHLD
@@ -266,8 +283,6 @@ void execute(char *args[MAXARGS], int control){
         return;
     }
     if (prefix_process == 0) {
-
-        signal(SIGINT, SIG_IGN);
 
         // unblocking SIGCHLD in child
         sigprocmask(SIG_SETMASK, &prev_one, NULL);
@@ -287,17 +302,18 @@ void execute(char *args[MAXARGS], int control){
             }
         }
     }
+    sigprocmask(SIG_SETMASK, &prev_one, NULL); // unblocking SIGCHLD
 
-    /* prefix_process_group = getppid(); */
-    /* prefix_process = 0; */
+    prefix_process_group = getppid();
     if (control == PREFIX) {
         waitpid(prefix_process, NULL, 0);
     }
+
     else {
         printf("Process created with PID: %d\n", prefix_process);
-        addjob(prefix_process, args[0]);
-        sigprocmask(SIG_SETMASK, &prev_one, NULL); // unblocking SIGCHLD
+        addjob(job, prefix_process, JOBCMD, job_exist);
     }
+
 
 }
 
@@ -314,8 +330,8 @@ void process(char *cmd){
         cmd++;
     if (*cmd == '\n')
         return;
-
-    for (; *cmd != '\n'; cmd++) {
+    cmd[strlen(cmd)-1] = '\0';
+    for (int i = 0; i < strlen(cmd); cmd++) {
 
         /* 忽略引号中的特殊字符，仅当做字符串存储 */
         if (*cmd == '"') {
@@ -349,8 +365,7 @@ void process(char *cmd){
 
     /*====init_args======*/
     char * args[MAXARGS];
-    for (int i = 0; i < MAXARGS; i++) 
-        args[i] = NULL;
+    initArgs(args, MAXARGS);
     /*====init_args======*/
 
     int i_cmd = 0, i_args = 0;
@@ -371,6 +386,10 @@ void process(char *cmd){
 
         }
         else if (!strcmp(stored_cmd[i_args], "&")) {
+            if (i_args+1 <= n_arg && stored_cmd[i_args+1]){
+                printf_clr("Syntax Error: `&` must be placed the end of command...\n", "r");
+                return;
+            }
             if (args[i_cmd] != NULL) 
                 /* execute(args, i_args-i_cmd, BACKGROUND); */
                 execute(args,  BACKGROUND);
@@ -397,39 +416,6 @@ void process(char *cmd){
 
 }
 
-
-void initjob(){
-    memset(&job, 0, joblen * MAXJOBS);
-    job_exist = 0;
-}
-
-void addjob(pid_t job_pid, char command_msg[FILENAME]){
-    int post; // 查找joblist中的空位置
-    for (post = 0; job[post].exist != 0 && post < MAXJOBS; ++post)
-        ; 
-    if (post >= MAXJOBS) {
-        sio_puts("joblist is full\n");
-        return;
-    }
-
-    job[post].id = post;
-    job[post].pid = job_pid;
-    job[post].status_code = RUNNING;
-    job[post].exist = 1;
-    strcpy(job[post].command, command_msg);
-    job_exist++;
-}
-
-void deletejob(pid_t job_pid){
-    int i;
-    for (i = 0; i < MAXJOBS; ++i) {
-       if (job[i].pid == job_pid) 
-           break;
-    }
-    printf("\n[%d]\t +%d\t done\t %s\t\n", job[i].id, job[i].pid, job[i].command);
-    memset(&job[i], 0, joblen);
-    job_exist--;
-}
 
 void show_terminal(){
 
