@@ -23,3 +23,7 @@
     sg|暂停一个作业
     quit|退出shell
     exit|退出shell
+
+***
+To compile hesh, use the following command.
+> gcc -O1 -g -o hesh hesh.c lib/config.c lib/job.c lib/default.c
